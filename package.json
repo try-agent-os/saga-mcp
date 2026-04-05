@@ -35,20 +35,22 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/spranab/saga-mcp.git"
+    "url": "git+https://github.com/novostudiotech/saga-mcp.git"
   },
-  "homepage": "https://github.com/spranab/saga-mcp#readme",
+  "homepage": "https://github.com/novostudiotech/saga-mcp#readme",
   "bugs": {
-    "url": "https://github.com/spranab/saga-mcp/issues"
+    "url": "https://github.com/novostudiotech/saga-mcp/issues"
   },
   "author": "spranab",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
-    "better-sqlite3": "^12.6.0"
+    "better-sqlite3": "^12.8.0",
+    "express": "^4.21.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
+    "@types/express": "^4.17.21",
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2"
   }
