@@ -92,6 +92,63 @@ async function runHttp(port: number) {
   const app = express();
   app.use(express.json());
 
+  // CORS for dashboard frontend
+  app.use((_req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    if (_req.method === 'OPTIONS') { res.sendStatus(204); return; }
+    next();
+  });
+
+  // REST API — thin wrappers over MCP handlers for direct frontend access
+  app.get('/api/dashboard', (_req, res) => {
+    try {
+      const projectId = Number(_req.query.project_id) || 1;
+      const result = CORE_HANDLERS['tracker_dashboard']({ project_id: projectId });
+      res.json(result);
+    } catch (e) { res.status(500).json({ error: String(e) }); }
+  });
+
+  app.get('/api/task/:id', (_req, res) => {
+    try {
+      const result = CORE_HANDLERS['task_get']({ id: Number(_req.params.id) });
+      res.json(result);
+    } catch (e) { res.status(500).json({ error: String(e) }); }
+  });
+
+  app.get('/api/tasks', (_req, res) => {
+    try {
+      const args: Record<string, unknown> = {};
+      if (_req.query.status) args.status = _req.query.status;
+      if (_req.query.epic_id) args.epic_id = Number(_req.query.epic_id);
+      if (_req.query.priority) args.priority = _req.query.priority;
+      if (_req.query.sort_by) args.sort_by = _req.query.sort_by;
+      if (_req.query.limit) args.limit = Number(_req.query.limit);
+      const result = CORE_HANDLERS['task_list'](args);
+      res.json(result);
+    } catch (e) { res.status(500).json({ error: String(e) }); }
+  });
+
+  app.get('/api/epics', (_req, res) => {
+    try {
+      const args: Record<string, unknown> = {};
+      if (_req.query.project_id) args.project_id = Number(_req.query.project_id);
+      const result = CORE_HANDLERS['epic_list'](args);
+      res.json(result);
+    } catch (e) { res.status(500).json({ error: String(e) }); }
+  });
+
+  app.get('/api/activity', (_req, res) => {
+    try {
+      const args: Record<string, unknown> = {};
+      if (_req.query.limit) args.limit = Number(_req.query.limit);
+      if (_req.query.entity_type) args.entity_type = _req.query.entity_type;
+      const result = CORE_HANDLERS['activity_log'](args);
+      res.json(result);
+    } catch (e) { res.status(500).json({ error: String(e) }); }
+  });
+
   const transports = new Map<string, SSEServerTransport>();
 
   app.get('/sse', async (_req, res) => {
