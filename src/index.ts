@@ -75,7 +75,10 @@ function createServer(): Server {
       const handler = CORE_HANDLERS[name];
       if (!handler) throw new Error(`Unknown tool: ${name}`);
       const result = handler(args ?? {});
-      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+      return {
+        _meta: { 'anthropic/maxResultSizeChars': 500000 },
+        content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+      };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       return {
