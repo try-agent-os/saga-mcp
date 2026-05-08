@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import express from 'express';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -103,9 +105,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error('Tracker MCP Server running on stdio');
+  const port = process.env.PORT ? parseInt(process.env.PORT, 10) : null;
+  if (!port) {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error('Tracker MCP Server running on stdio');
+    return;
+  }
+  const app = express();
+  app.use(express.json());
+  const transports = new Map<string, SSEServerTransport>();
+
+  app.get('/health', (_req, res) => {
+    res.json({ status: 'ok', sessions: transports.size, uptime: process.uptime() });
+  });
+
+  app.get('/sse', async (_req, res) => {
+    const transport = new SSEServerTransport('/messages', res);
+    transports.set(transport.sessionId, transport);
+    transport.onclose = () => transports.delete(transport.sessionId);
+    await server.connect(transport);
+  });
+
+  app.post('/messages', async (req, res) => {
+    const sessionId = req.query.sessionId as string;
+    const t = transports.get(sessionId);
+    if (!t) { res.status(404).json({ error: 'Session not found' }); return; }
+    await t.handlePostMessage(req, res, req.body);
+  });
+
+  app.listen(port, () => {
+    console.error(`Tracker MCP Server running on SSE http://localhost:${port}/sse`);
+  });
 }
 
 process.on('SIGINT', () => {
