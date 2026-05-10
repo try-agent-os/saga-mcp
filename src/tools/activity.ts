@@ -67,7 +67,7 @@ export const definitions: Tool[] = [
   },
 ];
 
-function handleActivityLog(args: Record<string, unknown>) {
+async function handleActivityLog(args: Record<string, unknown>) {
   const db = getDb();
   const entityType = args.entity_type as string | undefined;
   const entityId = args.entity_id as number | undefined;
@@ -99,16 +99,17 @@ function handleActivityLog(args: Record<string, unknown>) {
   const sql = `SELECT * FROM activity_log ${whereStr} ORDER BY created_at DESC LIMIT ?`;
   params.push(limit);
 
-  return db.prepare(sql).all(...params);
+  return db.query(sql, params);
 }
 
-function handleSessionDiff(args: Record<string, unknown>) {
+async function handleSessionDiff(args: Record<string, unknown>) {
   const db = getDb();
   const since = args.since as string;
 
-  const rows = db
-    .prepare('SELECT * FROM activity_log WHERE created_at >= ? ORDER BY created_at ASC')
-    .all(since) as Array<Record<string, unknown>>;
+  const rows = await db.query<Record<string, unknown>>(
+    'SELECT * FROM activity_log WHERE created_at >= ? ORDER BY created_at ASC',
+    [since]
+  );
 
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
@@ -147,7 +148,7 @@ function handleSessionDiff(args: Record<string, unknown>) {
   };
 }
 
-function handleTaskBatchUpdate(args: Record<string, unknown>) {
+async function handleTaskBatchUpdate(args: Record<string, unknown>) {
   const db = getDb();
   const ids = args.ids as number[];
   const status = args.status as string | undefined;
@@ -158,11 +159,10 @@ function handleTaskBatchUpdate(args: Record<string, unknown>) {
     throw new Error('Provide at least one field to update: status, priority, or assigned_to');
   }
 
-  const getStmt = db.prepare('SELECT * FROM tasks WHERE id = ?');
-
-  const results = db.transaction(() => {
-    return ids.map((id) => {
-      const oldRow = getStmt.get(id) as Record<string, unknown> | undefined;
+  const results = await db.transaction(async (tx) => {
+    const out: Record<string, unknown>[] = [];
+    for (const id of ids) {
+      const oldRow = await tx.queryOne<Record<string, unknown>>('SELECT * FROM tasks WHERE id = ?', [id]);
       if (!oldRow) throw new Error(`Task ${id} not found`);
 
       const updates: string[] = [];
@@ -184,21 +184,23 @@ function handleTaskBatchUpdate(args: Record<string, unknown>) {
       updates.push("updated_at = datetime('now')");
       params.push(id);
 
-      const newRow = db
-        .prepare(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ? RETURNING *`)
-        .get(...params) as Record<string, unknown>;
+      const newRow = await tx.queryOne<Record<string, unknown>>(
+        `UPDATE tasks SET ${updates.join(', ')} WHERE id = ? RETURNING *`,
+        params
+      );
+      if (!newRow) throw new Error(`Task ${id} not found after update`);
 
       // Log status changes
       if (status && oldRow.status !== status) {
-        logActivity(
-          db, 'task', id, 'status_changed', 'status',
+        await logActivity(
+          tx, 'task', id, 'status_changed', 'status',
           oldRow.status as string, status,
           `Task '${newRow.title}' status: ${oldRow.status} -> ${status}`
         );
       }
       if (priority && oldRow.priority !== priority) {
-        logActivity(
-          db, 'task', id, 'updated', 'priority',
+        await logActivity(
+          tx, 'task', id, 'updated', 'priority',
           oldRow.priority as string, priority,
           `Task '${newRow.title}' priority: ${oldRow.priority} -> ${priority}`
         );
@@ -206,21 +208,22 @@ function handleTaskBatchUpdate(args: Record<string, unknown>) {
 
       // Auto time tracking
       if (status === 'done' && oldRow.status !== 'done' && !newRow.actual_hours) {
-        const startEntry = db.prepare(
+        const startEntry = await tx.queryOne<{ created_at: string }>(
           `SELECT created_at FROM activity_log
            WHERE entity_type = 'task' AND entity_id = ? AND action = 'status_changed'
              AND field_name = 'status' AND new_value = 'in_progress'
-           ORDER BY created_at DESC LIMIT 1`
-        ).get(id) as { created_at: string } | undefined;
+           ORDER BY created_at DESC LIMIT 1`,
+          [id]
+        );
 
         if (startEntry) {
           const startMs = new Date(startEntry.created_at + 'Z').getTime();
           const nowMs = Date.now();
           const hours = Math.round(((nowMs - startMs) / 3_600_000) * 10) / 10;
           if (hours > 0) {
-            db.prepare('UPDATE tasks SET actual_hours = ? WHERE id = ?').run(hours, id);
+            await tx.execute('UPDATE tasks SET actual_hours = ? WHERE id = ?', [hours, id]);
             newRow.actual_hours = hours;
-            logActivity(db, 'task', id, 'updated', 'actual_hours', null, String(hours),
+            await logActivity(tx, 'task', id, 'updated', 'actual_hours', null, String(hours),
               `Task '${newRow.title}' auto-tracked: ${hours}h`);
           }
         }
@@ -228,12 +231,13 @@ function handleTaskBatchUpdate(args: Record<string, unknown>) {
 
       // Re-evaluate downstream dependencies when task marked done
       if (status === 'done' && oldRow.status !== 'done') {
-        reevaluateDownstream(db, id);
+        await reevaluateDownstream(tx, id);
       }
 
-      return newRow;
-    });
-  })();
+      out.push(newRow);
+    }
+    return out;
+  });
 
   return { updated: results.length, tasks: results };
 }

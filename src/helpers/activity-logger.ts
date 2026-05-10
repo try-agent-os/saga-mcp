@@ -1,7 +1,7 @@
-import type Database from 'better-sqlite3';
+import type { DB } from '../db.js';
 
-export function logActivity(
-  db: Database.Database,
+export async function logActivity(
+  db: DB,
   entityType: string,
   entityId: number,
   action: string,
@@ -9,28 +9,29 @@ export function logActivity(
   oldValue: string | null,
   newValue: string | null,
   summary: string
-): void {
-  db.prepare(
+): Promise<void> {
+  await db.execute(
     `INSERT INTO activity_log (entity_type, entity_id, action, field_name, old_value, new_value, summary)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(entityType, entityId, action, fieldName, oldValue, newValue, summary);
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [entityType, entityId, action, fieldName, oldValue, newValue, summary]
+  );
 }
 
-export function logEntityUpdate(
-  db: Database.Database,
+export async function logEntityUpdate(
+  db: DB,
   entityType: string,
   entityId: number,
   entityName: string,
   oldRow: Record<string, unknown>,
   newRow: Record<string, unknown>,
   trackedFields: string[]
-): void {
+): Promise<void> {
   for (const field of trackedFields) {
     const oldVal = String(oldRow[field] ?? '');
     const newVal = String(newRow[field] ?? '');
     if (oldVal !== newVal) {
       const action = field === 'status' ? 'status_changed' : 'updated';
-      logActivity(
+      await logActivity(
         db, entityType, entityId, action, field, oldVal, newVal,
         `${entityType} '${entityName}' ${field}: ${oldVal} -> ${newVal}`
       );

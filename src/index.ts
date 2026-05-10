@@ -32,7 +32,9 @@ const CORE_TOOLS: Tool[] = [
   ...exportImportDefs, // tracker_export, tracker_import
 ];
 
-const CORE_HANDLERS: Record<string, (args: Record<string, unknown>) => unknown> = {
+type AsyncToolHandler = (args: Record<string, unknown>) => unknown | Promise<unknown>;
+
+const CORE_HANDLERS: Record<string, AsyncToolHandler> = {
   ...projectHandlers,
   ...epicHandlers,
   ...taskHandlers,
@@ -52,11 +54,20 @@ function friendlyError(msg: string): string {
     const match = msg.match(/NOT NULL constraint failed: \w+\.(\w+)/);
     return match ? `Missing required field: ${match[1]}.` : 'A required field is missing.';
   }
-  if (msg.includes('FOREIGN KEY constraint failed')) {
+  if (msg.includes('FOREIGN KEY constraint failed') || msg.includes('foreign key constraint')) {
     return 'Referenced record not found. Check that the parent item exists.';
   }
-  if (msg.includes('no such table')) {
+  if (msg.includes('no such table') || msg.includes('relation') && msg.includes('does not exist')) {
     return 'Database not initialized. Run tracker_init first.';
+  }
+  // PG: duplicate key value violates unique constraint
+  if (msg.includes('duplicate key value violates unique constraint')) {
+    return 'A record with that value already exists.';
+  }
+  // PG: null value in column X violates not-null constraint
+  const pgNullMatch = msg.match(/null value in column "(\w+)" .*violates not-null constraint/);
+  if (pgNullMatch) {
+    return `Missing required field: ${pgNullMatch[1]}.`;
   }
   return msg;
 }
@@ -74,7 +85,7 @@ function createServer(): Server {
       const { name, arguments: args } = request.params;
       const handler = CORE_HANDLERS[name];
       if (!handler) throw new Error(`Unknown tool: ${name}`);
-      const result = handler(args ?? {});
+      const result = await handler(args ?? {});
       return {
         _meta: { 'anthropic/maxResultSizeChars': 500000 },
         content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
@@ -105,22 +116,22 @@ async function runHttp(port: number) {
   });
 
   // REST API — thin wrappers over MCP handlers for direct frontend access
-  app.get('/api/dashboard', (_req, res) => {
+  app.get('/api/dashboard', async (_req, res) => {
     try {
       const projectId = Number(_req.query.project_id) || 1;
-      const result = CORE_HANDLERS['tracker_dashboard']({ project_id: projectId });
+      const result = await CORE_HANDLERS['tracker_dashboard']({ project_id: projectId });
       res.json(result);
     } catch (e) { res.status(500).json({ error: String(e) }); }
   });
 
-  app.get('/api/task/:id', (_req, res) => {
+  app.get('/api/task/:id', async (_req, res) => {
     try {
-      const result = CORE_HANDLERS['task_get']({ id: Number(_req.params.id) });
+      const result = await CORE_HANDLERS['task_get']({ id: Number(_req.params.id) });
       res.json(result);
     } catch (e) { res.status(500).json({ error: String(e) }); }
   });
 
-  app.get('/api/tasks', (_req, res) => {
+  app.get('/api/tasks', async (_req, res) => {
     try {
       const args: Record<string, unknown> = {};
       if (_req.query.status) args.status = _req.query.status;
@@ -128,26 +139,26 @@ async function runHttp(port: number) {
       if (_req.query.priority) args.priority = _req.query.priority;
       if (_req.query.sort_by) args.sort_by = _req.query.sort_by;
       if (_req.query.limit) args.limit = Number(_req.query.limit);
-      const result = CORE_HANDLERS['task_list'](args);
+      const result = await CORE_HANDLERS['task_list'](args);
       res.json(result);
     } catch (e) { res.status(500).json({ error: String(e) }); }
   });
 
-  app.get('/api/epics', (_req, res) => {
+  app.get('/api/epics', async (_req, res) => {
     try {
       const args: Record<string, unknown> = {};
       if (_req.query.project_id) args.project_id = Number(_req.query.project_id);
-      const result = CORE_HANDLERS['epic_list'](args);
+      const result = await CORE_HANDLERS['epic_list'](args);
       res.json(result);
     } catch (e) { res.status(500).json({ error: String(e) }); }
   });
 
-  app.get('/api/activity', (_req, res) => {
+  app.get('/api/activity', async (_req, res) => {
     try {
       const args: Record<string, unknown> = {};
       if (_req.query.limit) args.limit = Number(_req.query.limit);
       if (_req.query.entity_type) args.entity_type = _req.query.entity_type;
-      const result = CORE_HANDLERS['activity_log'](args);
+      const result = await CORE_HANDLERS['activity_log'](args);
       res.json(result);
     } catch (e) { res.status(500).json({ error: String(e) }); }
   });
@@ -190,7 +201,7 @@ async function runHttp(port: number) {
     }
     transports.clear();
     httpServer.close();
-    closeDb();
+    await closeDb();
     process.exit(0);
   }
 
@@ -204,8 +215,8 @@ async function runStdio() {
   await server.connect(transport);
   console.error(`[saga-mcp] Running on stdio (${CORE_TOOLS.length} tools)`);
 
-  process.on('SIGINT', () => { closeDb(); process.exit(0); });
-  process.on('SIGTERM', () => { closeDb(); process.exit(0); });
+  process.on('SIGINT', async () => { await closeDb(); process.exit(0); });
+  process.on('SIGTERM', async () => { await closeDb(); process.exit(0); });
 }
 
 async function main() {

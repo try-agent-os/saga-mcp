@@ -33,34 +33,38 @@ export const definitions: Tool[] = [
   },
 ];
 
-function handleCommentAdd(args: Record<string, unknown>) {
+async function handleCommentAdd(args: Record<string, unknown>) {
   const db = getDb();
   const taskId = args.task_id as number;
   const content = args.content as string;
   const author = (args.author as string) ?? null;
 
   // Verify task exists
-  const task = db.prepare('SELECT id, title FROM tasks WHERE id = ?').get(taskId) as { id: number; title: string } | undefined;
+  const task = await db.queryOne<{ id: number; title: string }>(
+    'SELECT id, title FROM tasks WHERE id = ?', [taskId]
+  );
   if (!task) throw new Error(`Task ${taskId} not found`);
 
-  const comment = db
-    .prepare('INSERT INTO comments (task_id, author, content) VALUES (?, ?, ?) RETURNING *')
-    .get(taskId, author, content);
+  const comment = await db.queryOne<Record<string, unknown>>(
+    'INSERT INTO comments (task_id, author, content) VALUES (?, ?, ?) RETURNING *',
+    [taskId, author, content]
+  );
+  if (!comment) throw new Error('Failed to create comment');
 
-  const row = comment as Record<string, unknown>;
-  logActivity(db, 'comment', row.id as number, 'created', null, null, null,
+  await logActivity(db, 'comment', comment.id as number, 'created', null, null, null,
     `Comment added to task '${task.title}'${author ? ` by ${author}` : ''}`);
 
   return comment;
 }
 
-function handleCommentList(args: Record<string, unknown>) {
+async function handleCommentList(args: Record<string, unknown>) {
   const db = getDb();
   const taskId = args.task_id as number;
 
-  return db
-    .prepare('SELECT * FROM comments WHERE task_id = ? ORDER BY created_at ASC')
-    .all(taskId);
+  return db.query(
+    'SELECT * FROM comments WHERE task_id = ? ORDER BY created_at ASC',
+    [taskId]
+  );
 }
 
 export const handlers: Record<string, ToolHandler> = {

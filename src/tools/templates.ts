@@ -81,7 +81,7 @@ function substituteVariables(text: string, variables: Record<string, string>): s
   });
 }
 
-function handleTemplateCreate(args: Record<string, unknown>) {
+async function handleTemplateCreate(args: Record<string, unknown>) {
   const db = getDb();
   const name = args.name as string;
   const description = (args.description as string) ?? null;
@@ -89,20 +89,23 @@ function handleTemplateCreate(args: Record<string, unknown>) {
 
   const templateData = JSON.stringify(tasks);
 
-  const template = db
-    .prepare('INSERT INTO templates (name, description, template_data) VALUES (?, ?, ?) RETURNING *')
-    .get(name, description, templateData);
+  const template = await db.queryOne<Record<string, unknown>>(
+    'INSERT INTO templates (name, description, template_data) VALUES (?, ?, ?) RETURNING *',
+    [name, description, templateData]
+  );
+  if (!template) throw new Error('Failed to create template');
 
-  const row = template as Record<string, unknown>;
-  logActivity(db, 'template', row.id as number, 'created', null, null, null,
+  await logActivity(db, 'template', template.id as number, 'created', null, null, null,
     `Template '${name}' created with ${tasks.length} task(s)`);
 
-  return { ...row, tasks };
+  return { ...template, tasks };
 }
 
-function handleTemplateList() {
+async function handleTemplateList() {
   const db = getDb();
-  const templates = db.prepare('SELECT * FROM templates ORDER BY created_at DESC').all() as Array<Record<string, unknown>>;
+  const templates = await db.query<Record<string, unknown>>(
+    'SELECT * FROM templates ORDER BY created_at DESC'
+  );
 
   return templates.map((t) => ({
     ...t,
@@ -110,22 +113,27 @@ function handleTemplateList() {
   }));
 }
 
-function handleTemplateApply(args: Record<string, unknown>) {
+async function handleTemplateApply(args: Record<string, unknown>) {
   const db = getDb();
   const templateId = args.template_id as number;
   const epicId = args.epic_id as number;
   const variables = (args.variables as Record<string, string>) ?? {};
 
-  const template = db.prepare('SELECT * FROM templates WHERE id = ?').get(templateId) as Record<string, unknown> | undefined;
+  const template = await db.queryOne<Record<string, unknown>>(
+    'SELECT * FROM templates WHERE id = ?', [templateId]
+  );
   if (!template) throw new Error(`Template ${templateId} not found`);
 
-  const epic = db.prepare('SELECT id, name FROM epics WHERE id = ?').get(epicId) as { id: number; name: string } | undefined;
+  const epic = await db.queryOne<{ id: number; name: string }>(
+    'SELECT id, name FROM epics WHERE id = ?', [epicId]
+  );
   if (!epic) throw new Error(`Epic ${epicId} not found`);
 
   const taskDefs = JSON.parse(template.template_data as string) as Array<Record<string, unknown>>;
 
-  const createdTasks = db.transaction(() => {
-    return taskDefs.map((taskDef) => {
+  const createdTasks = await db.transaction(async (tx) => {
+    const out: Record<string, unknown>[] = [];
+    for (const taskDef of taskDefs) {
       const title = substituteVariables(taskDef.title as string, variables);
       const description = taskDef.description
         ? substituteVariables(taskDef.description as string, variables)
@@ -134,18 +142,20 @@ function handleTemplateApply(args: Record<string, unknown>) {
       const estimatedHours = (taskDef.estimated_hours as number) ?? null;
       const tags = JSON.stringify((taskDef.tags as string[]) ?? []);
 
-      const task = db.prepare(
+      const task = await tx.queryOne<Record<string, unknown>>(
         `INSERT INTO tasks (epic_id, title, description, priority, estimated_hours, tags)
-         VALUES (?, ?, ?, ?, ?, ?) RETURNING *`
-      ).get(epicId, title, description, priority, estimatedHours, tags);
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING *`,
+        [epicId, title, description, priority, estimatedHours, tags]
+      );
+      if (!task) throw new Error(`Failed to create task '${title}' from template`);
 
-      const row = task as Record<string, unknown>;
-      logActivity(db, 'task', row.id as number, 'created', null, null, null,
+      await logActivity(tx, 'task', task.id as number, 'created', null, null, null,
         `Task '${title}' created from template '${template.name}'`);
 
-      return task;
-    });
-  })();
+      out.push(task);
+    }
+    return out;
+  });
 
   return {
     message: `Applied template '${template.name}' to epic '${epic.name}'`,
@@ -156,15 +166,17 @@ function handleTemplateApply(args: Record<string, unknown>) {
   };
 }
 
-function handleTemplateDelete(args: Record<string, unknown>) {
+async function handleTemplateDelete(args: Record<string, unknown>) {
   const db = getDb();
   const id = args.id as number;
 
-  const template = db.prepare('SELECT * FROM templates WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  const template = await db.queryOne<Record<string, unknown>>(
+    'SELECT * FROM templates WHERE id = ?', [id]
+  );
   if (!template) throw new Error(`Template ${id} not found`);
 
-  db.prepare('DELETE FROM templates WHERE id = ?').run(id);
-  logActivity(db, 'template', id, 'deleted', null, null, null,
+  await db.execute('DELETE FROM templates WHERE id = ?', [id]);
+  await logActivity(db, 'template', id, 'deleted', null, null, null,
     `Template '${template.name}' deleted`);
 
   return { message: `Template '${template.name}' deleted` };

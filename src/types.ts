@@ -83,4 +83,4 @@ export interface ToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
-export type ToolHandler = (args: Record<string, unknown>) => unknown;
+export type ToolHandler = (args: Record<string, unknown>) => unknown | Promise<unknown>;

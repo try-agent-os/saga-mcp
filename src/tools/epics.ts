@@ -66,7 +66,7 @@ export const definitions: Tool[] = [
   },
 ];
 
-function handleEpicCreate(args: Record<string, unknown>) {
+async function handleEpicCreate(args: Record<string, unknown>) {
   const db = getDb();
   const projectId = args.project_id as number;
   const name = args.name as string;
@@ -75,19 +75,18 @@ function handleEpicCreate(args: Record<string, unknown>) {
   const priority = (args.priority as string) ?? 'medium';
   const tags = JSON.stringify((args.tags as string[]) ?? []);
 
-  const epic = db
-    .prepare(
-      'INSERT INTO epics (project_id, name, description, status, priority, tags) VALUES (?, ?, ?, ?, ?, ?) RETURNING *'
-    )
-    .get(projectId, name, description, status, priority, tags);
+  const epic = await db.queryOne<Record<string, unknown>>(
+    'INSERT INTO epics (project_id, name, description, status, priority, tags) VALUES (?, ?, ?, ?, ?, ?) RETURNING *',
+    [projectId, name, description, status, priority, tags]
+  );
+  if (!epic) throw new Error('Failed to create epic');
 
-  const row = epic as Record<string, unknown>;
-  logActivity(db, 'epic', row.id as number, 'created', null, null, null, `Epic '${name}' created in project ${projectId}`);
+  await logActivity(db, 'epic', epic.id as number, 'created', null, null, null, `Epic '${name}' created in project ${projectId}`);
 
   return epic;
 }
 
-function handleEpicList(args: Record<string, unknown>) {
+async function handleEpicList(args: Record<string, unknown>) {
   const db = getDb();
   const projectId = args.project_id as number;
   const status = args.status as string | undefined;
@@ -120,21 +119,22 @@ function handleEpicList(args: Record<string, unknown>) {
     ORDER BY e.sort_order, e.created_at
   `;
 
-  return db.prepare(sql).all(...params);
+  return db.query(sql, params);
 }
 
-function handleEpicUpdate(args: Record<string, unknown>) {
+async function handleEpicUpdate(args: Record<string, unknown>) {
   const db = getDb();
   const id = args.id as number;
 
-  const oldRow = db.prepare('SELECT * FROM epics WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  const oldRow = await db.queryOne<Record<string, unknown>>('SELECT * FROM epics WHERE id = ?', [id]);
   if (!oldRow) throw new Error(`Epic ${id} not found`);
 
   const update = buildUpdate('epics', id, args, ['name', 'description', 'status', 'priority', 'sort_order', 'tags']);
   if (!update) throw new Error('No fields to update');
 
-  const newRow = db.prepare(update.sql).get(...update.params) as Record<string, unknown>;
-  logEntityUpdate(db, 'epic', id, newRow.name as string, oldRow, newRow, ['name', 'status', 'priority']);
+  const newRow = await db.queryOne<Record<string, unknown>>(update.sql, update.params);
+  if (!newRow) throw new Error(`Epic ${id} not found after update`);
+  await logEntityUpdate(db, 'epic', id, newRow.name as string, oldRow, newRow, ['name', 'status', 'priority']);
 
   return newRow;
 }

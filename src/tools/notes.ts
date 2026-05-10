@@ -81,7 +81,7 @@ export const definitions: Tool[] = [
   },
 ];
 
-function handleNoteSave(args: Record<string, unknown>) {
+async function handleNoteSave(args: Record<string, unknown>) {
   const db = getDb();
   const id = args.id as number | undefined;
   const title = args.title as string;
@@ -93,35 +93,33 @@ function handleNoteSave(args: Record<string, unknown>) {
 
   if (id !== undefined) {
     // Update existing note
-    const existing = db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
+    const existing = await db.queryOne('SELECT * FROM notes WHERE id = ?', [id]);
     if (!existing) throw new Error(`Note ${id} not found`);
 
-    const note = db
-      .prepare(
-        `UPDATE notes SET title = ?, content = ?, note_type = ?, related_entity_type = ?,
-         related_entity_id = ?, tags = ?, updated_at = datetime('now')
-         WHERE id = ? RETURNING *`
-      )
-      .get(title, content, noteType, relatedEntityType, relatedEntityId, tags, id);
+    const note = await db.queryOne(
+      `UPDATE notes SET title = ?, content = ?, note_type = ?, related_entity_type = ?,
+       related_entity_id = ?, tags = ?, updated_at = datetime('now')
+       WHERE id = ? RETURNING *`,
+      [title, content, noteType, relatedEntityType, relatedEntityId, tags, id]
+    );
 
-    logActivity(db, 'note', id, 'updated', null, null, null, `Note '${title}' updated`);
+    await logActivity(db, 'note', id, 'updated', null, null, null, `Note '${title}' updated`);
     return note;
   } else {
     // Create new note
-    const note = db
-      .prepare(
-        `INSERT INTO notes (title, content, note_type, related_entity_type, related_entity_id, tags)
-         VALUES (?, ?, ?, ?, ?, ?) RETURNING *`
-      )
-      .get(title, content, noteType, relatedEntityType, relatedEntityId, tags);
+    const note = await db.queryOne<Record<string, unknown>>(
+      `INSERT INTO notes (title, content, note_type, related_entity_type, related_entity_id, tags)
+       VALUES (?, ?, ?, ?, ?, ?) RETURNING *`,
+      [title, content, noteType, relatedEntityType, relatedEntityId, tags]
+    );
+    if (!note) throw new Error('Failed to create note');
 
-    const row = note as Record<string, unknown>;
-    logActivity(db, 'note', row.id as number, 'created', null, null, null, `Note '${title}' created`);
+    await logActivity(db, 'note', note.id as number, 'created', null, null, null, `Note '${title}' created`);
     return note;
   }
 }
 
-function handleNoteList(args: Record<string, unknown>) {
+async function handleNoteList(args: Record<string, unknown>) {
   const db = getDb();
   const noteType = args.note_type as string | undefined;
   const relatedEntityType = args.related_entity_type as string | undefined;
@@ -153,10 +151,10 @@ function handleNoteList(args: Record<string, unknown>) {
   const sql = `SELECT * FROM notes ${whereStr} ORDER BY created_at DESC LIMIT ?`;
   params.push(limit);
 
-  return db.prepare(sql).all(...params);
+  return db.query(sql, params);
 }
 
-function handleNoteSearch(args: Record<string, unknown>) {
+async function handleNoteSearch(args: Record<string, unknown>) {
   const db = getDb();
   const query = args.query as string;
   const noteType = args.note_type as string | undefined;
@@ -174,18 +172,18 @@ function handleNoteSearch(args: Record<string, unknown>) {
   const sql = `SELECT * FROM notes WHERE ${whereClauses.join(' AND ')} ORDER BY created_at DESC LIMIT ?`;
   params.push(limit);
 
-  return db.prepare(sql).all(...params);
+  return db.query(sql, params);
 }
 
-function handleNoteDelete(args: Record<string, unknown>) {
+async function handleNoteDelete(args: Record<string, unknown>) {
   const db = getDb();
   const id = args.id as number;
 
-  const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  const note = await db.queryOne<Record<string, unknown>>('SELECT * FROM notes WHERE id = ?', [id]);
   if (!note) throw new Error(`Note ${id} not found`);
 
-  db.prepare('DELETE FROM notes WHERE id = ?').run(id);
-  logActivity(db, 'note', id, 'deleted', null, null, null, `Note '${note.title}' deleted`);
+  await db.execute('DELETE FROM notes WHERE id = ?', [id]);
+  await logActivity(db, 'note', id, 'deleted', null, null, null, `Note '${note.title}' deleted`);
 
   return { id, title: note.title, deleted: true };
 }

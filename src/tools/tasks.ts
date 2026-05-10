@@ -1,6 +1,5 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import type Database from 'better-sqlite3';
-import { getDb } from '../db.js';
+import { getDb, type DB } from '../db.js';
 import { buildUpdate, addTagFilter } from '../helpers/sql-builder.js';
 import { logActivity, logEntityUpdate } from '../helpers/activity-logger.js';
 import type { ToolHandler } from '../types.js';
@@ -122,56 +121,61 @@ export const definitions: Tool[] = [
 
 // --- Dependency helpers ---
 
-function setDependencies(db: Database.Database, taskId: number, dependsOn: number[]): void {
-  db.prepare('DELETE FROM task_dependencies WHERE task_id = ?').run(taskId);
-  const insert = db.prepare('INSERT INTO task_dependencies (task_id, depends_on_task_id) VALUES (?, ?)');
+async function setDependencies(db: DB, taskId: number, dependsOn: number[]): Promise<void> {
+  await db.execute('DELETE FROM task_dependencies WHERE task_id = ?', [taskId]);
   for (const depId of dependsOn) {
     if (depId === taskId) continue; // prevent self-dependency
-    insert.run(taskId, depId);
+    await db.execute('INSERT INTO task_dependencies (task_id, depends_on_task_id) VALUES (?, ?)', [taskId, depId]);
   }
 }
 
-function getUnmetDependencies(db: Database.Database, taskId: number): Array<{ id: number; title: string; status: string }> {
-  return db.prepare(
+async function getUnmetDependencies(db: DB, taskId: number): Promise<Array<{ id: number; title: string; status: string }>> {
+  return db.query<{ id: number; title: string; status: string }>(
     `SELECT t.id, t.title, t.status FROM task_dependencies d
      JOIN tasks t ON t.id = d.depends_on_task_id
-     WHERE d.task_id = ? AND t.status != 'done'`
-  ).all(taskId) as Array<{ id: number; title: string; status: string }>;
+     WHERE d.task_id = ? AND t.status != 'done'`,
+    [taskId]
+  );
 }
 
-function evaluateAndUpdateDependencies(db: Database.Database, taskId: number): void {
-  const task = db.prepare('SELECT id, status, title FROM tasks WHERE id = ?').get(taskId) as { id: number; status: string; title: string } | undefined;
+async function evaluateAndUpdateDependencies(db: DB, taskId: number): Promise<void> {
+  const task = await db.queryOne<{ id: number; status: string; title: string }>(
+    'SELECT id, status, title FROM tasks WHERE id = ?', [taskId]
+  );
   if (!task) return;
 
-  const deps = db.prepare('SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?').all(taskId) as Array<{ depends_on_task_id: number }>;
+  const deps = await db.query<{ depends_on_task_id: number }>(
+    'SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?', [taskId]
+  );
   if (deps.length === 0) return;
 
-  const unmet = getUnmetDependencies(db, taskId);
+  const unmet = await getUnmetDependencies(db, taskId);
 
   if (unmet.length > 0 && task.status !== 'blocked' && task.status !== 'done') {
-    db.prepare("UPDATE tasks SET status = 'blocked', updated_at = datetime('now') WHERE id = ?").run(taskId);
-    logActivity(db, 'task', taskId, 'status_changed', 'status', task.status, 'blocked',
+    await db.execute("UPDATE tasks SET status = 'blocked', updated_at = datetime('now') WHERE id = ?", [taskId]);
+    await logActivity(db, 'task', taskId, 'status_changed', 'status', task.status, 'blocked',
       `Task '${task.title}' auto-blocked: depends on ${unmet.map(u => `#${u.id}`).join(', ')}`);
   } else if (unmet.length === 0 && task.status === 'blocked') {
-    db.prepare("UPDATE tasks SET status = 'todo', updated_at = datetime('now') WHERE id = ?").run(taskId);
-    logActivity(db, 'task', taskId, 'status_changed', 'status', 'blocked', 'todo',
+    await db.execute("UPDATE tasks SET status = 'todo', updated_at = datetime('now') WHERE id = ?", [taskId]);
+    await logActivity(db, 'task', taskId, 'status_changed', 'status', 'blocked', 'todo',
       `Task '${task.title}' auto-unblocked: all dependencies met`);
   }
 }
 
-export function reevaluateDownstream(db: Database.Database, completedTaskId: number): void {
-  const downstream = db.prepare(
-    'SELECT task_id FROM task_dependencies WHERE depends_on_task_id = ?'
-  ).all(completedTaskId) as Array<{ task_id: number }>;
+export async function reevaluateDownstream(db: DB, completedTaskId: number): Promise<void> {
+  const downstream = await db.query<{ task_id: number }>(
+    'SELECT task_id FROM task_dependencies WHERE depends_on_task_id = ?',
+    [completedTaskId]
+  );
 
   for (const row of downstream) {
-    evaluateAndUpdateDependencies(db, row.task_id);
+    await evaluateAndUpdateDependencies(db, row.task_id);
   }
 }
 
 // --- Handlers ---
 
-function handleTaskCreate(args: Record<string, unknown>) {
+async function handleTaskCreate(args: Record<string, unknown>) {
   const db = getDb();
   const epicId = args.epic_id as number;
   const title = args.title as string;
@@ -185,22 +189,21 @@ function handleTaskCreate(args: Record<string, unknown>) {
   const tags = JSON.stringify((args.tags as string[]) ?? []);
   const dependsOn = (args.depends_on as number[]) ?? [];
 
-  const task = db
-    .prepare(
-      `INSERT INTO tasks (epic_id, title, description, status, priority, assigned_to, estimated_hours, due_date, source_ref, tags)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`
-    )
-    .get(epicId, title, description, status, priority, assignedTo, estimatedHours, dueDate, sourceRef, tags);
+  const task = await db.queryOne<Record<string, unknown>>(
+    `INSERT INTO tasks (epic_id, title, description, status, priority, assigned_to, estimated_hours, due_date, source_ref, tags)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+    [epicId, title, description, status, priority, assignedTo, estimatedHours, dueDate, sourceRef, tags]
+  );
+  if (!task) throw new Error('Failed to create task');
 
-  const row = task as Record<string, unknown>;
-  const taskId = row.id as number;
-  logActivity(db, 'task', taskId, 'created', null, null, null, `Task '${title}' created`);
+  const taskId = task.id as number;
+  await logActivity(db, 'task', taskId, 'created', null, null, null, `Task '${title}' created`);
 
   if (dependsOn.length > 0) {
-    setDependencies(db, taskId, dependsOn);
-    evaluateAndUpdateDependencies(db, taskId);
+    await setDependencies(db, taskId, dependsOn);
+    await evaluateAndUpdateDependencies(db, taskId);
     // Re-fetch to get potentially updated status
-    return db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+    return db.queryOne('SELECT * FROM tasks WHERE id = ?', [taskId]);
   }
 
   return task;
@@ -224,7 +227,7 @@ function getTaskOrderClause(sortBy: string): string {
   }
 }
 
-function handleTaskList(args: Record<string, unknown>) {
+async function handleTaskList(args: Record<string, unknown>) {
   const db = getDb();
   const epicId = args.epic_id as number | undefined;
   const status = args.status as string | undefined;
@@ -259,6 +262,14 @@ function handleTaskList(args: Record<string, unknown>) {
 
   const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
+  // NB: SQLite ORDER BY can reference SELECT-list aliases; PG can too, but the
+  // subquery `blocked_by_count` is in the SELECT list. The actual ORDER BY uses
+  // raw column expressions so we are fine in both dialects.
+  // Task list uses GROUP BY t.id which is fine in both dialects when the
+  // remaining selected columns either come from t.* or are aggregates.
+  // PG is stricter: every non-aggregate select column must be a primary-key
+  // grouping target or appear in GROUP BY. Since t.id is the PK of tasks, PG
+  // accepts the rest of t.* implicitly. e.name and the subqueries are okay.
   const sql = `
     SELECT t.*,
       e.name as epic_name,
@@ -271,72 +282,70 @@ function handleTaskList(args: Record<string, unknown>) {
     JOIN epics e ON e.id = t.epic_id
     LEFT JOIN subtasks s ON s.task_id = t.id
     ${whereStr}
-    GROUP BY t.id
+    GROUP BY t.id, e.name
     ORDER BY ${getTaskOrderClause(sortBy)}
     LIMIT ?
   `;
 
   params.push(limit);
-  return db.prepare(sql).all(...params);
+  return db.query(sql, params);
 }
 
-function handleTaskGet(args: Record<string, unknown>) {
+async function handleTaskGet(args: Record<string, unknown>) {
   const db = getDb();
   const id = args.id as number;
 
-  const task = db
-    .prepare(
-      `SELECT t.*, e.name as epic_name
-       FROM tasks t
-       JOIN epics e ON e.id = t.epic_id
-       WHERE t.id = ?`
-    )
-    .get(id);
+  const task = await db.queryOne(
+    `SELECT t.*, e.name as epic_name
+     FROM tasks t
+     JOIN epics e ON e.id = t.epic_id
+     WHERE t.id = ?`,
+    [id]
+  );
 
   if (!task) throw new Error(`Task ${id} not found`);
 
-  const subtasks = db
-    .prepare('SELECT * FROM subtasks WHERE task_id = ? ORDER BY sort_order, created_at')
-    .all(id);
+  const subtasks = await db.query(
+    'SELECT * FROM subtasks WHERE task_id = ? ORDER BY sort_order, created_at',
+    [id]
+  );
 
-  const notes = db
-    .prepare(
-      `SELECT * FROM notes
-       WHERE related_entity_type = 'task' AND related_entity_id = ?
-       ORDER BY created_at DESC`
-    )
-    .all(id);
+  const notes = await db.query(
+    `SELECT * FROM notes
+     WHERE related_entity_type = 'task' AND related_entity_id = ?
+     ORDER BY created_at DESC`,
+    [id]
+  );
 
-  const comments = db
-    .prepare('SELECT * FROM comments WHERE task_id = ? ORDER BY created_at ASC')
-    .all(id);
+  const comments = await db.query(
+    'SELECT * FROM comments WHERE task_id = ? ORDER BY created_at ASC',
+    [id]
+  );
 
   // Dependencies: what this task depends on
-  const dependsOn = db
-    .prepare(
-      `SELECT t.id, t.title, t.status FROM task_dependencies d
-       JOIN tasks t ON t.id = d.depends_on_task_id
-       WHERE d.task_id = ?`
-    )
-    .all(id);
+  const dependsOn = await db.query(
+    `SELECT t.id, t.title, t.status FROM task_dependencies d
+     JOIN tasks t ON t.id = d.depends_on_task_id
+     WHERE d.task_id = ?`,
+    [id]
+  );
 
   // Dependents: what tasks depend on this task
-  const dependents = db
-    .prepare(
-      `SELECT t.id, t.title, t.status FROM task_dependencies d
-       JOIN tasks t ON t.id = d.task_id
-       WHERE d.depends_on_task_id = ?`
-    )
-    .all(id);
+  const dependents = await db.query(
+    `SELECT t.id, t.title, t.status FROM task_dependencies d
+     JOIN tasks t ON t.id = d.task_id
+     WHERE d.depends_on_task_id = ?`,
+    [id]
+  );
 
   return { ...(task as object), subtasks, notes, comments, depends_on: dependsOn, dependents };
 }
 
-function handleTaskUpdate(args: Record<string, unknown>) {
+async function handleTaskUpdate(args: Record<string, unknown>) {
   const db = getDb();
   const id = args.id as number;
 
-  const oldRow = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  const oldRow = await db.queryOne<Record<string, unknown>>('SELECT * FROM tasks WHERE id = ?', [id]);
   if (!oldRow) throw new Error(`Task ${id} not found`);
 
   const update = buildUpdate('tasks', id, args, [
@@ -347,8 +356,10 @@ function handleTaskUpdate(args: Record<string, unknown>) {
   let newRow: Record<string, unknown>;
 
   if (update) {
-    newRow = db.prepare(update.sql).get(...update.params) as Record<string, unknown>;
-    logEntityUpdate(db, 'task', id, newRow.title as string, oldRow, newRow, [
+    const updated = await db.queryOne<Record<string, unknown>>(update.sql, update.params);
+    if (!updated) throw new Error(`Task ${id} not found after update`);
+    newRow = updated;
+    await logEntityUpdate(db, 'task', id, newRow.title as string, oldRow, newRow, [
       'status', 'priority', 'assigned_to', 'title',
     ]);
   } else if (args.depends_on !== undefined) {
@@ -361,33 +372,35 @@ function handleTaskUpdate(args: Record<string, unknown>) {
   // Handle dependency updates
   if (args.depends_on !== undefined) {
     const dependsOn = args.depends_on as number[];
-    setDependencies(db, id, dependsOn);
-    logActivity(db, 'task', id, 'updated', 'depends_on', null,
+    await setDependencies(db, id, dependsOn);
+    await logActivity(db, 'task', id, 'updated', 'depends_on', null,
       dependsOn.length > 0 ? dependsOn.join(',') : '(none)',
       `Task '${newRow.title}' dependencies updated: [${dependsOn.join(', ')}]`);
-    evaluateAndUpdateDependencies(db, id);
+    await evaluateAndUpdateDependencies(db, id);
     // Re-fetch in case status changed
-    newRow = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Record<string, unknown>;
+    const refetched = await db.queryOne<Record<string, unknown>>('SELECT * FROM tasks WHERE id = ?', [id]);
+    if (refetched) newRow = refetched;
   }
 
   // Auto time tracking: when status changes to done and actual_hours wasn't manually set
   const statusChanged = args.status && oldRow.status !== args.status;
   if (statusChanged && args.status === 'done' && !args.actual_hours && !newRow.actual_hours) {
-    const startEntry = db.prepare(
+    const startEntry = await db.queryOne<{ created_at: string }>(
       `SELECT created_at FROM activity_log
        WHERE entity_type = 'task' AND entity_id = ? AND action = 'status_changed'
          AND field_name = 'status' AND new_value = 'in_progress'
-       ORDER BY created_at DESC LIMIT 1`
-    ).get(id) as { created_at: string } | undefined;
+       ORDER BY created_at DESC LIMIT 1`,
+      [id]
+    );
 
     if (startEntry) {
       const startMs = new Date(startEntry.created_at + 'Z').getTime();
       const nowMs = Date.now();
       const hours = Math.round(((nowMs - startMs) / 3_600_000) * 10) / 10; // 1 decimal
       if (hours > 0) {
-        db.prepare('UPDATE tasks SET actual_hours = ? WHERE id = ?').run(hours, id);
-        (newRow as Record<string, unknown>).actual_hours = hours;
-        logActivity(db, 'task', id, 'updated', 'actual_hours', null, String(hours),
+        await db.execute('UPDATE tasks SET actual_hours = ? WHERE id = ?', [hours, id]);
+        newRow.actual_hours = hours;
+        await logActivity(db, 'task', id, 'updated', 'actual_hours', null, String(hours),
           `Task '${newRow.title}' auto-tracked: ${hours}h`);
       }
     }
@@ -395,7 +408,7 @@ function handleTaskUpdate(args: Record<string, unknown>) {
 
   // Re-evaluate downstream tasks when this task is marked done
   if (statusChanged && args.status === 'done') {
-    reevaluateDownstream(db, id);
+    await reevaluateDownstream(db, id);
   }
 
   return newRow;

@@ -31,12 +31,12 @@ export const definitions: Tool[] = [
   },
 ];
 
-function handleDashboard(args: Record<string, unknown>) {
+async function handleDashboard(args: Record<string, unknown>) {
   const db = getDb();
 
   let projectId = args.project_id as number | undefined;
   if (!projectId) {
-    const first = db.prepare('SELECT id FROM projects LIMIT 1').get() as { id: number } | undefined;
+    const first = await db.queryOne<{ id: number }>('SELECT id FROM projects LIMIT 1');
     if (!first) {
       return {
         message: 'No projects found. Use tracker_init or project_create to get started.',
@@ -46,13 +46,12 @@ function handleDashboard(args: Record<string, unknown>) {
     projectId = first.id;
   }
 
-  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId);
+  const project = await db.queryOne('SELECT * FROM projects WHERE id = ?', [projectId]);
   if (!project) throw new Error(`Project ${projectId} not found`);
 
   // Aggregate stats
-  const stats = db
-    .prepare(
-      `
+  const stats = await db.queryOne(
+    `
     WITH epic_ids AS (
       SELECT id FROM epics WHERE project_id = ?
     ),
@@ -75,14 +74,13 @@ function handleDashboard(args: Record<string, unknown>) {
         THEN ROUND(ts.tasks_done * 100.0 / ts.total_tasks, 1)
         ELSE 0 END as completion_pct
     FROM task_stats ts
-  `
-    )
-    .get(projectId);
+  `,
+    [projectId]
+  );
 
   // Epics with task counts
-  const epics = db
-    .prepare(
-      `
+  const epics = await db.query(
+    `
     SELECT e.*,
       COUNT(t.id) as task_count,
       SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) as done_count,
@@ -95,55 +93,59 @@ function handleDashboard(args: Record<string, unknown>) {
     WHERE e.project_id = ?
     GROUP BY e.id
     ORDER BY e.sort_order, e.created_at
-  `
-    )
-    .all(projectId);
+  `,
+    [projectId]
+  );
 
   // Blocked tasks
-  const blockedTasks = db
-    .prepare(
-      `
+  const blockedTasks = await db.query(
+    `
     SELECT t.id, t.title, t.priority, e.name as epic_name
     FROM tasks t
     JOIN epics e ON e.id = t.epic_id
     WHERE e.project_id = ? AND t.status = 'blocked'
     ORDER BY
       CASE t.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END
-  `
-    )
-    .all(projectId);
+  `,
+    [projectId]
+  );
 
   // Overdue tasks
   const today = new Date().toISOString().slice(0, 10);
-  const overdueTasks = db
-    .prepare(
-      `SELECT t.id, t.title, t.due_date, t.priority, e.name as epic_name
-       FROM tasks t
-       JOIN epics e ON e.id = t.epic_id
-       WHERE e.project_id = ? AND t.due_date < ? AND t.status NOT IN ('done')
-       ORDER BY t.due_date ASC`
-    )
-    .all(projectId, today) as Array<Record<string, unknown>>;
+  const overdueTasks = await db.query(
+    `SELECT t.id, t.title, t.due_date, t.priority, e.name as epic_name
+     FROM tasks t
+     JOIN epics e ON e.id = t.epic_id
+     WHERE e.project_id = ? AND t.due_date < ? AND t.status NOT IN ('done')
+     ORDER BY t.due_date ASC`,
+    [projectId, today]
+  );
 
   // Recent activity (last 10)
-  const recentActivity = db
-    .prepare(
-      'SELECT summary, action, entity_type, entity_id, created_at FROM activity_log ORDER BY created_at DESC LIMIT 10'
-    )
-    .all();
+  const recentActivity = await db.query(
+    'SELECT summary, action, entity_type, entity_id, created_at FROM activity_log ORDER BY created_at DESC LIMIT 10'
+  );
 
   // Recent notes (last 5)
-  const recentNotes = db
-    .prepare('SELECT id, title, note_type, created_at FROM notes ORDER BY created_at DESC LIMIT 5')
-    .all();
+  const recentNotes = await db.query(
+    'SELECT id, title, note_type, created_at FROM notes ORDER BY created_at DESC LIMIT 5'
+  );
 
-  // Generate natural language summary
-  const s = stats as Record<string, number>;
+  // Generate natural language summary.
+  // PG returns SUM() as string for bigint contexts; coerce to number for the
+  // summary so concatenation and comparisons behave like SQLite did.
+  const s = stats as Record<string, unknown>;
+  const num = (v: unknown): number => (v == null ? 0 : Number(v));
+  const totalTasks = num(s.total_tasks);
+  const totalEpics = num(s.total_epics);
+  const completionPct = num(s.completion_pct);
+  const tasksBlocked = num(s.tasks_blocked);
+  const tasksInProgress = num(s.tasks_in_progress);
   const p = project as Record<string, unknown>;
   const epicList = epics as Array<Record<string, unknown>>;
 
   const summaryParts: string[] = [];
-  summaryParts.push(`${p.name}: ${s.total_tasks} tasks across ${s.total_epics} epics. ${s.completion_pct}% complete.`);
+  summaryParts.push(`${p.name}: ${totalTasks} tasks across ${totalEpics} epics. ${completionPct}% complete.`);
 
   const activeEpics = epicList.filter((e) => e.status === 'in_progress');
   if (activeEpics.length > 0) {
@@ -158,8 +160,8 @@ function handleDashboard(args: Record<string, unknown>) {
     summaryParts.push(`Next up: ${nextEpic.name} (${nextEpic.task_count} tasks).`);
   }
 
-  if (s.tasks_blocked > 0) {
-    summaryParts.push(`${s.tasks_blocked} blocked task(s).`);
+  if (tasksBlocked > 0) {
+    summaryParts.push(`${tasksBlocked} blocked task(s).`);
   } else {
     summaryParts.push('No blocked tasks.');
   }
@@ -168,8 +170,8 @@ function handleDashboard(args: Record<string, unknown>) {
     summaryParts.push(`${overdueTasks.length} overdue task(s).`);
   }
 
-  if (s.tasks_in_progress > 0) {
-    summaryParts.push(`${s.tasks_in_progress} in progress.`);
+  if (tasksInProgress > 0) {
+    summaryParts.push(`${tasksInProgress} in progress.`);
   }
 
   const summary = summaryParts.join(' ');
@@ -186,10 +188,10 @@ function handleDashboard(args: Record<string, unknown>) {
   };
 }
 
-function handleTrackerInit(args: Record<string, unknown>) {
+async function handleTrackerInit(args: Record<string, unknown>) {
   const db = getDb();
 
-  const existing = db.prepare('SELECT * FROM projects LIMIT 1').get();
+  const existing = await db.queryOne('SELECT * FROM projects LIMIT 1');
   if (existing) {
     return {
       message: 'Tracker already initialized. Returning existing project.',
@@ -206,12 +208,13 @@ function handleTrackerInit(args: Record<string, unknown>) {
   }
 
   const description = (args.project_description as string) ?? null;
-  const project = db
-    .prepare('INSERT INTO projects (name, description) VALUES (?, ?) RETURNING *')
-    .get(projectName, description);
+  const project = await db.queryOne<Record<string, unknown>>(
+    'INSERT INTO projects (name, description) VALUES (?, ?) RETURNING *',
+    [projectName, description]
+  );
+  if (!project) throw new Error('Failed to initialize project');
 
-  const row = project as Record<string, unknown>;
-  logActivity(db, 'project', row.id as number, 'created', null, null, null, `Project '${projectName}' initialized`);
+  await logActivity(db, 'project', project.id as number, 'created', null, null, null, `Project '${projectName}' initialized`);
 
   return {
     message: `Project '${projectName}' created. Use epic_create to start adding work.`,

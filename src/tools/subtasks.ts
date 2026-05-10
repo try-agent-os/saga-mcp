@@ -57,32 +57,34 @@ export const definitions: Tool[] = [
   },
 ];
 
-function handleSubtaskCreate(args: Record<string, unknown>) {
+async function handleSubtaskCreate(args: Record<string, unknown>) {
   const db = getDb();
   const taskId = args.task_id as number;
   const rawTitles = args.titles;
   const titles = Array.isArray(rawTitles) ? rawTitles as string[] : [rawTitles as string];
 
-  const stmt = db.prepare(
-    'INSERT INTO subtasks (task_id, title) VALUES (?, ?) RETURNING *'
-  );
-
-  const created = db.transaction(() => {
-    return titles.map((title) => {
-      const subtask = stmt.get(taskId, title) as Record<string, unknown>;
-      logActivity(db, 'subtask', subtask.id as number, 'created', null, null, null, `Subtask '${title}' created`);
-      return subtask;
-    });
-  })();
+  const created = await db.transaction(async (tx) => {
+    const rows: Record<string, unknown>[] = [];
+    for (const title of titles) {
+      const subtask = await tx.queryOne<Record<string, unknown>>(
+        'INSERT INTO subtasks (task_id, title) VALUES (?, ?) RETURNING *',
+        [taskId, title]
+      );
+      if (!subtask) throw new Error(`Failed to create subtask '${title}'`);
+      await logActivity(tx, 'subtask', subtask.id as number, 'created', null, null, null, `Subtask '${title}' created`);
+      rows.push(subtask);
+    }
+    return rows;
+  });
 
   return created.length === 1 ? created[0] : created;
 }
 
-function handleSubtaskUpdate(args: Record<string, unknown>) {
+async function handleSubtaskUpdate(args: Record<string, unknown>) {
   const db = getDb();
   const id = args.id as number;
 
-  const oldRow = db.prepare('SELECT * FROM subtasks WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  const oldRow = await db.queryOne<Record<string, unknown>>('SELECT * FROM subtasks WHERE id = ?', [id]);
   if (!oldRow) throw new Error(`Subtask ${id} not found`);
 
   const updates: string[] = [];
@@ -106,12 +108,14 @@ function handleSubtaskUpdate(args: Record<string, unknown>) {
   updates.push("updated_at = datetime('now')");
   params.push(id);
 
-  const newRow = db
-    .prepare(`UPDATE subtasks SET ${updates.join(', ')} WHERE id = ? RETURNING *`)
-    .get(...params) as Record<string, unknown>;
+  const newRow = await db.queryOne<Record<string, unknown>>(
+    `UPDATE subtasks SET ${updates.join(', ')} WHERE id = ? RETURNING *`,
+    params
+  );
+  if (!newRow) throw new Error(`Subtask ${id} not found after update`);
 
   if (oldRow.status !== newRow.status) {
-    logActivity(
+    await logActivity(
       db, 'subtask', id, 'status_changed', 'status',
       oldRow.status as string, newRow.status as string,
       `Subtask '${newRow.title}' status: ${oldRow.status} -> ${newRow.status}`
@@ -121,23 +125,22 @@ function handleSubtaskUpdate(args: Record<string, unknown>) {
   return newRow;
 }
 
-function handleSubtaskDelete(args: Record<string, unknown>) {
+async function handleSubtaskDelete(args: Record<string, unknown>) {
   const db = getDb();
   const rawIds = args.ids;
   const ids = Array.isArray(rawIds) ? rawIds as number[] : [rawIds as number];
 
-  const getStmt = db.prepare('SELECT * FROM subtasks WHERE id = ?');
-  const delStmt = db.prepare('DELETE FROM subtasks WHERE id = ?');
-
-  const deleted = db.transaction(() => {
-    return ids.map((id) => {
-      const row = getStmt.get(id) as Record<string, unknown> | undefined;
+  const deleted = await db.transaction(async (tx) => {
+    const rows: Array<{ id: number; title: unknown; deleted: true }> = [];
+    for (const id of ids) {
+      const row = await tx.queryOne<Record<string, unknown>>('SELECT * FROM subtasks WHERE id = ?', [id]);
       if (!row) throw new Error(`Subtask ${id} not found`);
-      delStmt.run(id);
-      logActivity(db, 'subtask', id, 'deleted', null, null, null, `Subtask '${row.title}' deleted`);
-      return { id, title: row.title, deleted: true };
-    });
-  })();
+      await tx.execute('DELETE FROM subtasks WHERE id = ?', [id]);
+      await logActivity(tx, 'subtask', id, 'deleted', null, null, null, `Subtask '${row.title}' deleted`);
+      rows.push({ id, title: row.title, deleted: true });
+    }
+    return rows;
+  });
 
   return deleted.length === 1 ? deleted[0] : deleted;
 }

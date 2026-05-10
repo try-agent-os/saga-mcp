@@ -24,7 +24,7 @@ export const definitions: Tool[] = [
   },
 ];
 
-function handleSearch(args: Record<string, unknown>) {
+async function handleSearch(args: Record<string, unknown>) {
   const db = getDb();
   const query = args.query as string;
   const entityTypes = (args.entity_types as string[] | undefined) ?? ['project', 'epic', 'task', 'note'];
@@ -34,39 +34,39 @@ function handleSearch(args: Record<string, unknown>) {
   const results: Record<string, unknown[]> = {};
 
   if (entityTypes.includes('project')) {
-    results.projects = db
-      .prepare('SELECT * FROM projects WHERE name LIKE ? OR description LIKE ? LIMIT ?')
-      .all(pattern, pattern, limit);
+    results.projects = await db.query(
+      'SELECT * FROM projects WHERE name LIKE ? OR description LIKE ? LIMIT ?',
+      [pattern, pattern, limit]
+    );
   }
 
   if (entityTypes.includes('epic')) {
-    results.epics = db
-      .prepare(
-        `SELECT e.*, p.name as project_name
-         FROM epics e
-         JOIN projects p ON p.id = e.project_id
-         WHERE e.name LIKE ? OR e.description LIKE ?
-         LIMIT ?`
-      )
-      .all(pattern, pattern, limit);
+    results.epics = await db.query(
+      `SELECT e.*, p.name as project_name
+       FROM epics e
+       JOIN projects p ON p.id = e.project_id
+       WHERE e.name LIKE ? OR e.description LIKE ?
+       LIMIT ?`,
+      [pattern, pattern, limit]
+    );
   }
 
   if (entityTypes.includes('task')) {
-    results.tasks = db
-      .prepare(
-        `SELECT t.*, e.name as epic_name
-         FROM tasks t
-         JOIN epics e ON e.id = t.epic_id
-         WHERE t.title LIKE ? OR t.description LIKE ?
-         LIMIT ?`
-      )
-      .all(pattern, pattern, limit);
+    results.tasks = await db.query(
+      `SELECT t.*, e.name as epic_name
+       FROM tasks t
+       JOIN epics e ON e.id = t.epic_id
+       WHERE t.title LIKE ? OR t.description LIKE ?
+       LIMIT ?`,
+      [pattern, pattern, limit]
+    );
   }
 
   if (entityTypes.includes('note')) {
-    results.notes = db
-      .prepare('SELECT * FROM notes WHERE title LIKE ? OR content LIKE ? LIMIT ?')
-      .all(pattern, pattern, limit);
+    results.notes = await db.query(
+      'SELECT * FROM notes WHERE title LIKE ? OR content LIKE ? LIMIT ?',
+      [pattern, pattern, limit]
+    );
   }
 
   return results;

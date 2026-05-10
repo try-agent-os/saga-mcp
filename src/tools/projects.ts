@@ -64,26 +64,25 @@ export const definitions: Tool[] = [
   },
 ];
 
-function handleProjectCreate(args: Record<string, unknown>) {
+async function handleProjectCreate(args: Record<string, unknown>) {
   const db = getDb();
   const name = args.name as string;
   const description = (args.description as string) ?? null;
   const status = (args.status as string) ?? 'active';
   const tags = JSON.stringify((args.tags as string[]) ?? []);
 
-  const project = db
-    .prepare(
-      'INSERT INTO projects (name, description, status, tags) VALUES (?, ?, ?, ?) RETURNING *'
-    )
-    .get(name, description, status, tags);
+  const project = await db.queryOne<Record<string, unknown>>(
+    'INSERT INTO projects (name, description, status, tags) VALUES (?, ?, ?, ?) RETURNING *',
+    [name, description, status, tags]
+  );
+  if (!project) throw new Error('Failed to create project');
 
-  const row = project as Record<string, unknown>;
-  logActivity(db, 'project', row.id as number, 'created', null, null, null, `Project '${name}' created`);
+  await logActivity(db, 'project', project.id as number, 'created', null, null, null, `Project '${name}' created`);
 
   return project;
 }
 
-function handleProjectList(args: Record<string, unknown>) {
+async function handleProjectList(args: Record<string, unknown>) {
   const db = getDb();
   const status = args.status as string | undefined;
 
@@ -108,21 +107,22 @@ function handleProjectList(args: Record<string, unknown>) {
 
   sql += ' GROUP BY p.id ORDER BY p.created_at DESC';
 
-  return db.prepare(sql).all(...params);
+  return db.query(sql, params);
 }
 
-function handleProjectUpdate(args: Record<string, unknown>) {
+async function handleProjectUpdate(args: Record<string, unknown>) {
   const db = getDb();
   const id = args.id as number;
 
-  const oldRow = db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  const oldRow = await db.queryOne<Record<string, unknown>>('SELECT * FROM projects WHERE id = ?', [id]);
   if (!oldRow) throw new Error(`Project ${id} not found`);
 
   const update = buildUpdate('projects', id, args, ['name', 'description', 'status', 'tags']);
   if (!update) throw new Error('No fields to update');
 
-  const newRow = db.prepare(update.sql).get(...update.params) as Record<string, unknown>;
-  logEntityUpdate(db, 'project', id, newRow.name as string, oldRow, newRow, ['name', 'status']);
+  const newRow = await db.queryOne<Record<string, unknown>>(update.sql, update.params);
+  if (!newRow) throw new Error(`Project ${id} not found after update`);
+  await logEntityUpdate(db, 'project', id, newRow.name as string, oldRow, newRow, ['name', 'status']);
 
   return newRow;
 }

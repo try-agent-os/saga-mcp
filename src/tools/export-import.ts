@@ -37,37 +37,49 @@ export const definitions: Tool[] = [
   },
 ];
 
-function handleExport(args: Record<string, unknown>) {
+async function handleExport(args: Record<string, unknown>) {
   const db = getDb();
 
   let projectId = args.project_id as number | undefined;
   if (!projectId) {
-    const first = db.prepare('SELECT id FROM projects LIMIT 1').get() as { id: number } | undefined;
+    const first = await db.queryOne<{ id: number }>('SELECT id FROM projects LIMIT 1');
     if (!first) throw new Error('No projects found. Create a project first.');
     projectId = first.id;
   }
 
-  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as Record<string, unknown>;
+  const project = await db.queryOne<Record<string, unknown>>(
+    'SELECT * FROM projects WHERE id = ?', [projectId]
+  );
   if (!project) throw new Error(`Project ${projectId} not found`);
 
-  const epics = db.prepare('SELECT * FROM epics WHERE project_id = ? ORDER BY sort_order, created_at')
-    .all(projectId) as Array<Record<string, unknown>>;
+  const epics = await db.query<Record<string, unknown>>(
+    'SELECT * FROM epics WHERE project_id = ? ORDER BY sort_order, created_at',
+    [projectId]
+  );
 
-  const epicData = epics.map((epic) => {
-    const tasks = db.prepare('SELECT * FROM tasks WHERE epic_id = ? ORDER BY sort_order, created_at')
-      .all(epic.id as number) as Array<Record<string, unknown>>;
+  const epicData = await Promise.all(epics.map(async (epic) => {
+    const tasks = await db.query<Record<string, unknown>>(
+      'SELECT * FROM tasks WHERE epic_id = ? ORDER BY sort_order, created_at',
+      [epic.id as number]
+    );
 
-    const taskData = tasks.map((task) => {
+    const taskData = await Promise.all(tasks.map(async (task) => {
       const taskId = task.id as number;
 
-      const subtasks = db.prepare('SELECT * FROM subtasks WHERE task_id = ? ORDER BY sort_order, created_at')
-        .all(taskId) as Array<Record<string, unknown>>;
+      const subtasks = await db.query<Record<string, unknown>>(
+        'SELECT * FROM subtasks WHERE task_id = ? ORDER BY sort_order, created_at',
+        [taskId]
+      );
 
-      const comments = db.prepare('SELECT * FROM comments WHERE task_id = ? ORDER BY created_at ASC')
-        .all(taskId) as Array<Record<string, unknown>>;
+      const comments = await db.query<Record<string, unknown>>(
+        'SELECT * FROM comments WHERE task_id = ? ORDER BY created_at ASC',
+        [taskId]
+      );
 
-      const deps = db.prepare('SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?')
-        .all(taskId) as Array<{ depends_on_task_id: number }>;
+      const deps = await db.query<{ depends_on_task_id: number }>(
+        'SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?',
+        [taskId]
+      );
 
       return {
         _original_id: task.id,
@@ -95,7 +107,7 @@ function handleExport(args: Record<string, unknown>) {
           created_at: c.created_at,
         })),
       };
-    });
+    }));
 
     return {
       _original_id: epic.id,
@@ -108,40 +120,44 @@ function handleExport(args: Record<string, unknown>) {
       metadata: epic.metadata,
       tasks: taskData,
     };
-  });
+  }));
 
   // Collect notes linked to this project, its epics, or its tasks
   const notes: Array<Record<string, unknown>> = [];
 
-  notes.push(...db.prepare(
-    `SELECT * FROM notes WHERE related_entity_type = 'project' AND related_entity_id = ?`
-  ).all(projectId) as Array<Record<string, unknown>>);
+  notes.push(...await db.query<Record<string, unknown>>(
+    `SELECT * FROM notes WHERE related_entity_type = 'project' AND related_entity_id = ?`,
+    [projectId]
+  ));
 
   const epicIds = epics.map((e) => e.id as number);
   if (epicIds.length > 0) {
     const placeholders = epicIds.map(() => '?').join(',');
-    notes.push(...db.prepare(
-      `SELECT * FROM notes WHERE related_entity_type = 'epic' AND related_entity_id IN (${placeholders})`
-    ).all(...epicIds) as Array<Record<string, unknown>>);
+    notes.push(...await db.query<Record<string, unknown>>(
+      `SELECT * FROM notes WHERE related_entity_type = 'epic' AND related_entity_id IN (${placeholders})`,
+      epicIds
+    ));
   }
 
   const allTaskIds: number[] = [];
   for (const epic of epics) {
-    const tasks = db.prepare('SELECT id FROM tasks WHERE epic_id = ?')
-      .all(epic.id as number) as Array<{ id: number }>;
+    const tasks = await db.query<{ id: number }>(
+      'SELECT id FROM tasks WHERE epic_id = ?', [epic.id as number]
+    );
     allTaskIds.push(...tasks.map((t) => t.id));
   }
   if (allTaskIds.length > 0) {
     const placeholders = allTaskIds.map(() => '?').join(',');
-    notes.push(...db.prepare(
-      `SELECT * FROM notes WHERE related_entity_type = 'task' AND related_entity_id IN (${placeholders})`
-    ).all(...allTaskIds) as Array<Record<string, unknown>>);
+    notes.push(...await db.query<Record<string, unknown>>(
+      `SELECT * FROM notes WHERE related_entity_type = 'task' AND related_entity_id IN (${placeholders})`,
+      allTaskIds
+    ));
   }
 
   // Include unlinked notes
-  notes.push(...db.prepare(
+  notes.push(...await db.query<Record<string, unknown>>(
     'SELECT * FROM notes WHERE related_entity_type IS NULL'
-  ).all() as Array<Record<string, unknown>>);
+  ));
 
   const noteData = notes.map((n) => ({
     title: n.title,
@@ -168,7 +184,7 @@ function handleExport(args: Record<string, unknown>) {
   };
 }
 
-function handleImport(args: Record<string, unknown>) {
+async function handleImport(args: Record<string, unknown>) {
   const db = getDb();
   const data = args.data as Record<string, unknown>;
 
@@ -182,23 +198,25 @@ function handleImport(args: Record<string, unknown>) {
     throw new Error('Invalid import data: missing project or project.name');
   }
 
-  const result = db.transaction(() => {
+  const result = await db.transaction(async (tx) => {
     const epicIdMap = new Map<number, number>();
     const taskIdMap = new Map<number, number>();
 
     // 1. Create project
-    const project = db.prepare(
-      'INSERT INTO projects (name, description, status, tags, metadata) VALUES (?, ?, ?, ?, ?) RETURNING *'
-    ).get(
-      projectData.name,
-      projectData.description ?? null,
-      projectData.status ?? 'active',
-      projectData.tags ?? '[]',
-      projectData.metadata ?? '{}'
-    ) as Record<string, unknown>;
+    const project = await tx.queryOne<Record<string, unknown>>(
+      'INSERT INTO projects (name, description, status, tags, metadata) VALUES (?, ?, ?, ?, ?) RETURNING *',
+      [
+        projectData.name,
+        projectData.description ?? null,
+        projectData.status ?? 'active',
+        projectData.tags ?? '[]',
+        projectData.metadata ?? '{}',
+      ]
+    );
+    if (!project) throw new Error('Failed to create imported project');
 
     const newProjectId = project.id as number;
-    logActivity(db, 'project', newProjectId, 'created', null, null, null, `Project '${projectData.name}' imported`);
+    await logActivity(tx, 'project', newProjectId, 'created', null, null, null, `Project '${projectData.name}' imported`);
 
     // 2. Create epics and their children
     const epics = (projectData.epics as Array<Record<string, unknown>>) ?? [];
@@ -212,56 +230,60 @@ function handleImport(args: Record<string, unknown>) {
     const deferredDeps: Array<{ newTaskId: number; originalDeps: number[] }> = [];
 
     for (const epicData of epics) {
-      const epic = db.prepare(
+      const epic = await tx.queryOne<Record<string, unknown>>(
         `INSERT INTO epics (project_id, name, description, status, priority, sort_order, tags, metadata)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`
-      ).get(
-        newProjectId,
-        epicData.name,
-        epicData.description ?? null,
-        epicData.status ?? 'planned',
-        epicData.priority ?? 'medium',
-        epicData.sort_order ?? 0,
-        epicData.tags ?? '[]',
-        epicData.metadata ?? '{}'
-      ) as Record<string, unknown>;
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+        [
+          newProjectId,
+          epicData.name,
+          epicData.description ?? null,
+          epicData.status ?? 'planned',
+          epicData.priority ?? 'medium',
+          epicData.sort_order ?? 0,
+          epicData.tags ?? '[]',
+          epicData.metadata ?? '{}',
+        ]
+      );
+      if (!epic) throw new Error(`Failed to create imported epic '${epicData.name}'`);
 
       const newEpicId = epic.id as number;
       if (epicData._original_id != null) {
         epicIdMap.set(epicData._original_id as number, newEpicId);
       }
       epicCount++;
-      logActivity(db, 'epic', newEpicId, 'created', null, null, null, `Epic '${epicData.name}' imported`);
+      await logActivity(tx, 'epic', newEpicId, 'created', null, null, null, `Epic '${epicData.name}' imported`);
 
       // 3. Create tasks
       const tasks = (epicData.tasks as Array<Record<string, unknown>>) ?? [];
       for (const taskData of tasks) {
-        const task = db.prepare(
+        const task = await tx.queryOne<Record<string, unknown>>(
           `INSERT INTO tasks (epic_id, title, description, status, priority, sort_order,
            assigned_to, estimated_hours, actual_hours, due_date, source_ref, tags, metadata)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`
-        ).get(
-          newEpicId,
-          taskData.title,
-          taskData.description ?? null,
-          taskData.status ?? 'todo',
-          taskData.priority ?? 'medium',
-          taskData.sort_order ?? 0,
-          taskData.assigned_to ?? null,
-          taskData.estimated_hours ?? null,
-          taskData.actual_hours ?? null,
-          taskData.due_date ?? null,
-          taskData.source_ref ?? null,
-          taskData.tags ?? '[]',
-          taskData.metadata ?? '{}'
-        ) as Record<string, unknown>;
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+          [
+            newEpicId,
+            taskData.title,
+            taskData.description ?? null,
+            taskData.status ?? 'todo',
+            taskData.priority ?? 'medium',
+            taskData.sort_order ?? 0,
+            taskData.assigned_to ?? null,
+            taskData.estimated_hours ?? null,
+            taskData.actual_hours ?? null,
+            taskData.due_date ?? null,
+            taskData.source_ref ?? null,
+            taskData.tags ?? '[]',
+            taskData.metadata ?? '{}',
+          ]
+        );
+        if (!task) throw new Error(`Failed to create imported task '${taskData.title}'`);
 
         const newTaskId = task.id as number;
         if (taskData._original_id != null) {
           taskIdMap.set(taskData._original_id as number, newTaskId);
         }
         taskCount++;
-        logActivity(db, 'task', newTaskId, 'created', null, null, null, `Task '${taskData.title}' imported`);
+        await logActivity(tx, 'task', newTaskId, 'created', null, null, null, `Task '${taskData.title}' imported`);
 
         // Defer dependency creation
         const originalDeps = (taskData.depends_on as number[]) ?? [];
@@ -272,37 +294,42 @@ function handleImport(args: Record<string, unknown>) {
         // 4. Create subtasks
         const subtasks = (taskData.subtasks as Array<Record<string, unknown>>) ?? [];
         for (const subtaskData of subtasks) {
-          const subtask = db.prepare(
-            'INSERT INTO subtasks (task_id, title, status, sort_order) VALUES (?, ?, ?, ?) RETURNING *'
-          ).get(
-            newTaskId,
-            subtaskData.title,
-            subtaskData.status ?? 'todo',
-            subtaskData.sort_order ?? 0
-          ) as Record<string, unknown>;
+          const subtask = await tx.queryOne<Record<string, unknown>>(
+            'INSERT INTO subtasks (task_id, title, status, sort_order) VALUES (?, ?, ?, ?) RETURNING *',
+            [
+              newTaskId,
+              subtaskData.title,
+              subtaskData.status ?? 'todo',
+              subtaskData.sort_order ?? 0,
+            ]
+          );
+          if (!subtask) throw new Error(`Failed to create imported subtask '${subtaskData.title}'`);
 
           subtaskCount++;
-          logActivity(db, 'subtask', subtask.id as number, 'created', null, null, null, `Subtask '${subtaskData.title}' imported`);
+          await logActivity(tx, 'subtask', subtask.id as number, 'created', null, null, null, `Subtask '${subtaskData.title}' imported`);
         }
 
         // 5. Create comments
         const comments = (taskData.comments as Array<Record<string, unknown>>) ?? [];
         for (const commentData of comments) {
-          db.prepare(
-            'INSERT INTO comments (task_id, author, content) VALUES (?, ?, ?)'
-          ).run(newTaskId, commentData.author ?? null, commentData.content);
+          await tx.execute(
+            'INSERT INTO comments (task_id, author, content) VALUES (?, ?, ?)',
+            [newTaskId, commentData.author ?? null, commentData.content]
+          );
           commentCount++;
         }
       }
     }
 
     // 6. Create dependencies with ID remapping
-    const depInsert = db.prepare('INSERT INTO task_dependencies (task_id, depends_on_task_id) VALUES (?, ?)');
     for (const { newTaskId, originalDeps } of deferredDeps) {
       for (const origDepId of originalDeps) {
         const newDepId = taskIdMap.get(origDepId);
         if (newDepId != null) {
-          depInsert.run(newTaskId, newDepId);
+          await tx.execute(
+            'INSERT INTO task_dependencies (task_id, depends_on_task_id) VALUES (?, ?)',
+            [newTaskId, newDepId]
+          );
           depCount++;
         }
       }
@@ -329,21 +356,23 @@ function handleImport(args: Record<string, unknown>) {
         }
       }
 
-      const note = db.prepare(
+      const note = await tx.queryOne<Record<string, unknown>>(
         `INSERT INTO notes (title, content, note_type, related_entity_type, related_entity_id, tags, metadata)
-         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *`
-      ).get(
-        noteData.title,
-        noteData.content,
-        noteData.note_type ?? 'general',
-        relatedEntityType,
-        relatedEntityId,
-        noteData.tags ?? '[]',
-        noteData.metadata ?? '{}'
-      ) as Record<string, unknown>;
+         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+        [
+          noteData.title,
+          noteData.content,
+          noteData.note_type ?? 'general',
+          relatedEntityType,
+          relatedEntityId,
+          noteData.tags ?? '[]',
+          noteData.metadata ?? '{}',
+        ]
+      );
+      if (!note) throw new Error(`Failed to create imported note '${noteData.title}'`);
 
       noteCount++;
-      logActivity(db, 'note', note.id as number, 'created', null, null, null, `Note '${noteData.title}' imported`);
+      await logActivity(tx, 'note', note.id as number, 'created', null, null, null, `Note '${noteData.title}' imported`);
     }
 
     return {
@@ -352,7 +381,7 @@ function handleImport(args: Record<string, unknown>) {
       project_name: projectData.name,
       counts: { epics: epicCount, tasks: taskCount, subtasks: subtaskCount, comments: commentCount, dependencies: depCount, notes: noteCount },
     };
-  })();
+  });
 
   return result;
 }
