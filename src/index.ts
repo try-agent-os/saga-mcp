@@ -50,15 +50,6 @@ const ALL_HANDLERS: Record<string, (args: Record<string, unknown>) => unknown> =
   ...exportImportHandlers,
 };
 
-const server = new Server(
-  { name: 'tracker', version: '1.0.0' },
-  { capabilities: { tools: {} } }
-);
-
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools: ALL_TOOLS };
-});
-
 function friendlyError(msg: string): string {
   if (msg.includes('UNIQUE constraint failed')) {
     const match = msg.match(/UNIQUE constraint failed: \w+\.(\w+)/);
@@ -77,38 +68,51 @@ function friendlyError(msg: string): string {
   return msg;
 }
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  try {
-    const { name, arguments: args } = request.params;
-    const handler = ALL_HANDLERS[name];
-    if (!handler) {
-      throw new Error(`Unknown tool: ${name}`);
-    }
+function createServer(): Server {
+  const server = new Server(
+    { name: 'tracker', version: '1.0.0' },
+    { capabilities: { tools: {} } }
+  );
 
-    const result = handler(args ?? {});
-    return {
-      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-    };
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    const friendly = friendlyError(msg);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `Error: ${friendly}`,
-        },
-      ],
-      isError: true,
-    };
-  }
-});
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return { tools: ALL_TOOLS };
+  });
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    try {
+      const { name, arguments: args } = request.params;
+      const handler = ALL_HANDLERS[name];
+      if (!handler) {
+        throw new Error(`Unknown tool: ${name}`);
+      }
+
+      const result = handler(args ?? {});
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      const friendly = friendlyError(msg);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error: ${friendly}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
+  return server;
+}
 
 async function main() {
   const port = process.env.PORT ? parseInt(process.env.PORT, 10) : null;
   if (!port) {
     const transport = new StdioServerTransport();
-    await server.connect(transport);
+    await createServer().connect(transport);
     console.error('Tracker MCP Server running on stdio');
     return;
   }
@@ -124,7 +128,7 @@ async function main() {
     const transport = new SSEServerTransport('/messages', res);
     transports.set(transport.sessionId, transport);
     transport.onclose = () => transports.delete(transport.sessionId);
-    await server.connect(transport);
+    await createServer().connect(transport);
   });
 
   app.post('/messages', async (req, res) => {
