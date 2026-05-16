@@ -1,18 +1,23 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { getDb } from '../db.js';
 import { logActivity } from '../helpers/activity-logger.js';
+import { resolveBranch } from '../helpers/git.js';
 import type { ToolHandler } from '../types.js';
 
 export const definitions: Tool[] = [
   {
     name: 'tracker_dashboard',
     description:
-      'Get a comprehensive project overview in a single call. Returns: project info, all epics with task counts, overall stats (total/done/blocked/in_progress), recent activity, and recent notes. This is the best first tool to call when starting work on a project.',
+      'Get a comprehensive project overview in a single call. Returns: project info, all epics with task counts, overall stats (total/done/blocked/in_progress), recent activity, and recent notes. This is the best first tool to call when starting work on a project. Pass branch="current" to scope the dashboard to the active git branch.',
     annotations: { title: 'Project Dashboard', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
         project_id: { type: 'integer', description: 'Project ID (omit if only one project exists)' },
+        branch: {
+          type: 'string',
+          description: 'Scope to a git branch. Pass "current" to auto-detect; pass empty string to restrict to branch-agnostic epics. Omit to include everything.',
+        },
       },
     },
   },
@@ -49,11 +54,24 @@ async function handleDashboard(args: Record<string, unknown>) {
   const project = await db.queryOne('SELECT * FROM projects WHERE id = ?', [projectId]);
   if (!project) throw new Error(`Project ${projectId} not found`);
 
+  const branchFilter = resolveBranch(args.branch);
+  let branchSql = '';
+  const branchParams: unknown[] = [];
+  let branchLabel: string | null = null;
+  if (branchFilter === null) {
+    branchSql = ' AND e.branch IS NULL';
+    branchLabel = '(branch-agnostic)';
+  } else if (branchFilter !== undefined) {
+    branchSql = ' AND e.branch = ?';
+    branchParams.push(branchFilter);
+    branchLabel = branchFilter;
+  }
+
   // Aggregate stats
   const stats = await db.queryOne(
     `
     WITH epic_ids AS (
-      SELECT id FROM epics WHERE project_id = ?
+      SELECT e.id FROM epics e WHERE e.project_id = ?${branchSql}
     ),
     task_stats AS (
       SELECT
@@ -75,7 +93,7 @@ async function handleDashboard(args: Record<string, unknown>) {
         ELSE 0 END as completion_pct
     FROM task_stats ts
   `,
-    [projectId]
+    [projectId, ...branchParams]
   );
 
   // Epics with task counts
@@ -90,11 +108,11 @@ async function handleDashboard(args: Record<string, unknown>) {
         ELSE 0 END as completion_pct
     FROM epics e
     LEFT JOIN tasks t ON t.epic_id = e.id
-    WHERE e.project_id = ?
+    WHERE e.project_id = ?${branchSql}
     GROUP BY e.id
     ORDER BY e.sort_order, e.created_at
   `,
-    [projectId]
+    [projectId, ...branchParams]
   );
 
   // Blocked tasks
@@ -103,11 +121,11 @@ async function handleDashboard(args: Record<string, unknown>) {
     SELECT t.id, t.title, t.priority, e.name as epic_name
     FROM tasks t
     JOIN epics e ON e.id = t.epic_id
-    WHERE e.project_id = ? AND t.status = 'blocked'
+    WHERE e.project_id = ? AND t.status = 'blocked'${branchSql}
     ORDER BY
       CASE t.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END
   `,
-    [projectId]
+    [projectId, ...branchParams]
   );
 
   // Overdue tasks
@@ -116,9 +134,9 @@ async function handleDashboard(args: Record<string, unknown>) {
     `SELECT t.id, t.title, t.due_date, t.priority, e.name as epic_name
      FROM tasks t
      JOIN epics e ON e.id = t.epic_id
-     WHERE e.project_id = ? AND t.due_date < ? AND t.status NOT IN ('done')
+     WHERE e.project_id = ? AND t.due_date < ? AND t.status NOT IN ('done')${branchSql}
      ORDER BY t.due_date ASC`,
-    [projectId, today]
+    [projectId, today, ...branchParams]
   );
 
   // Recent activity (last 10)
@@ -145,7 +163,8 @@ async function handleDashboard(args: Record<string, unknown>) {
   const epicList = epics as Array<Record<string, unknown>>;
 
   const summaryParts: string[] = [];
-  summaryParts.push(`${p.name}: ${totalTasks} tasks across ${totalEpics} epics. ${completionPct}% complete.`);
+  const scope = branchLabel ? ` [branch: ${branchLabel}]` : '';
+  summaryParts.push(`${p.name}${scope}: ${totalTasks} tasks across ${totalEpics} epics. ${completionPct}% complete.`);
 
   const activeEpics = epicList.filter((e) => e.status === 'in_progress');
   if (activeEpics.length > 0) {
@@ -179,6 +198,7 @@ async function handleDashboard(args: Record<string, unknown>) {
   return {
     summary,
     project,
+    branch_scope: branchLabel,
     stats,
     epics,
     blocked_tasks: blockedTasks,

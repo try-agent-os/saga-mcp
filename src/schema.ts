@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS epics (
   priority      TEXT NOT NULL DEFAULT 'medium'
                   CHECK (priority IN ('low', 'medium', 'high', 'critical')),
   sort_order    INTEGER NOT NULL DEFAULT 0,
+  branch        TEXT,
   tags          TEXT NOT NULL DEFAULT '[]',
   metadata      TEXT NOT NULL DEFAULT '{}',
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
@@ -137,6 +138,8 @@ CREATE INDEX IF NOT EXISTS idx_subtasks_status ON subtasks(status);
 
 CREATE INDEX IF NOT EXISTS idx_epics_priority ON epics(priority);
 CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
+
+CREATE INDEX IF NOT EXISTS idx_epics_branch ON epics(branch);
 
 CREATE INDEX IF NOT EXISTS idx_epics_sort ON epics(project_id, sort_order);
 CREATE INDEX IF NOT EXISTS idx_tasks_sort ON tasks(epic_id, sort_order);

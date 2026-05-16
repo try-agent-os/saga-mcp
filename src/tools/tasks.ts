@@ -2,6 +2,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { getDb, type DB } from '../db.js';
 import { buildUpdate, addTagFilter } from '../helpers/sql-builder.js';
 import { logActivity, logEntityUpdate } from '../helpers/activity-logger.js';
+import { resolveBranch } from '../helpers/git.js';
 import type { ToolHandler } from '../types.js';
 
 export const definitions: Tool[] = [
@@ -49,7 +50,7 @@ export const definitions: Tool[] = [
   {
     name: 'task_list',
     description:
-      'List tasks with optional filters. If no epic_id given, lists across ALL epics. Includes subtask counts and dependency info.',
+      'List tasks with optional filters. If no epic_id given, lists across ALL epics. Includes subtask counts and dependency info. Pass branch="current" to restrict to tasks whose epic is scoped to the active git branch.',
     annotations: { title: 'List Tasks', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: 'object',
@@ -59,6 +60,10 @@ export const definitions: Tool[] = [
         priority: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
         assigned_to: { type: 'string', description: 'Filter by assignee' },
         tag: { type: 'string', description: 'Filter by tag' },
+        branch: {
+          type: 'string',
+          description: 'Filter by the git branch of the task\'s epic. Pass "current" to auto-detect; pass empty string to restrict to branch-agnostic epics. Omit to list all.',
+        },
         sort_by: {
           type: 'string',
           enum: ['priority', 'created', 'due_date', 'status'],
@@ -234,6 +239,7 @@ async function handleTaskList(args: Record<string, unknown>) {
   const priority = args.priority as string | undefined;
   const assignedTo = args.assigned_to as string | undefined;
   const tag = args.tag as string | undefined;
+  const branchFilter = resolveBranch(args.branch);
   const sortBy = (args.sort_by as string) ?? 'priority';
   const limit = (args.limit as number) ?? 50;
 
@@ -258,6 +264,12 @@ async function handleTaskList(args: Record<string, unknown>) {
   }
   if (tag) {
     addTagFilter(whereClauses, params, tag, 't');
+  }
+  if (branchFilter === null) {
+    whereClauses.push('e.branch IS NULL');
+  } else if (branchFilter !== undefined) {
+    whereClauses.push('e.branch = ?');
+    params.push(branchFilter);
   }
 
   const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';

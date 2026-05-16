@@ -201,6 +201,8 @@ export function getDb(): DB {
   sqliteRaw.exec(SCHEMA_SQL);
   // Legacy migrations for existing databases.
   try { sqliteRaw.exec('ALTER TABLE tasks ADD COLUMN source_ref TEXT'); } catch { /* column already exists */ }
+  try { sqliteRaw.exec('ALTER TABLE epics ADD COLUMN branch TEXT'); } catch { /* column already exists */ }
+  try { sqliteRaw.exec('CREATE INDEX IF NOT EXISTS idx_epics_branch ON epics(branch)'); } catch { /* index already exists */ }
 
   cachedDb = sqliteAdapter(sqliteRaw);
   return cachedDb;
